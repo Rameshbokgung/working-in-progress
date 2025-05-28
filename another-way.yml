@@ -1,0 +1,123 @@
+name: Build, Release, and Deploy .NET 8 Azure Function
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  FUNCTION_APP_NAME: your-azure-function-app-name  # Replace with your Function App name
+  AZURE_PUBLISH_PROFILE: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}  # Must be set in GitHub secrets
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '8.x'
+
+      - name: Restore dependencies
+        run: |
+          echo "Restoring dependencies..."
+          dotnet restore
+
+      - name: Build
+        run: |
+          echo "Building project..."
+          dotnet build --configuration Release
+
+      - name: Publish
+        run: |
+          echo "Publishing project..."
+          dotnet publish --configuration Release --output ./output
+
+      - name: Zip the output
+        run: |
+          echo "Creating deployment ZIP..."
+          cd output
+          zip -r ../func.zip .
+          cd ..
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: function-zip
+          path: func.zip
+
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: function-zip
+          path: .
+
+      - name: Determine next version tag
+        id: get_version
+        run: |
+          echo "Fetching latest tag..."
+          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "Latest tag: $latest_tag"
+
+          # Remove 'v' prefix for easier parsing
+          latest_tag="${latest_tag#v}"
+
+          # Split into major, minor, patch
+          IFS='.' read -r major minor patch <<< "$latest_tag"
+
+          # Increment patch (default behavior)
+          patch=$((patch + 1))
+          new_tag="v$major.$minor.$patch"
+
+          echo "New tag: $new_tag"
+          echo "new_tag=$new_tag" >> $GITHUB_OUTPUT
+
+      - name: Create Git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git tag ${{ steps.get_version.outputs.new_tag }}
+          git push origin ${{ steps.get_version.outputs.new_tag }}
+
+      - name: Create GitHub Release
+        run: |
+          echo "Creating GitHub Release for ${{ steps.get_version.outputs.new_tag }}..."
+          gh release create "${{ steps.get_version.outputs.new_tag }}" func.zip \
+            --title "Release ${{ steps.get_version.outputs.new_tag }}" \
+            --notes "Automated release of ${{ steps.get_version.outputs.new_tag }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: release
+    steps:
+      - name: Download Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: function-zip
+          path: .
+
+      - name: Setup Azure CLI
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+
+      - name: Deploy to Azure Function App
+        run: |
+          echo "Deploying to Azure Function App: $FUNCTION_APP_NAME"
+          az webapp deployment source config-zip \
+            --resource-group your-resource-group-name \  # Replace with your resource group
+            --name $FUNCTION_APP_NAME \
+            --src func.zip
