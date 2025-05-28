@@ -1,0 +1,167 @@
+name: Full CI/CD: Build, Publish Artifact, and Deploy Function App
+
+on:
+  push:
+    branches:
+      - main # Trigger on pushes to main for automated full pipeline
+  workflow_dispatch: # Enable manual triggering
+    inputs:
+      artifact_version:
+        description: 'Version for the deployment artifact (e.g., 1.0.0, 1.0.0-beta)'
+        required: true
+        type: string
+      # You could add more inputs here for different environments (e.g., 'environment: Development/Staging/Production')
+
+env: # Define environment variables for clarity and reusability
+  FUNCTION_APP_PROJECT_PATH: './src/MyFunctionApp' # Path to your Function App project directory
+  FUNCTION_APP_PROJECT_NAME: 'MyFunctionApp' # Name of your Function App (e.g., MyFunctionApp, derived from .csproj name)
+  DOTNET_VERSION: '6.x' # Your desired .NET version, e.g., '6.x', '8.x'
+
+permissions:
+  contents: write # For creating GitHub Releases
+  id-token: write # Required for OIDC authentication with Azure (recommended)
+  packages: write # If you still plan to publish actual NuGet packages from here
+
+jobs:
+  build-and-publish-artifact:
+    runs-on: ubuntu-latest
+    outputs:
+      zip_file_name: ${{ steps.zip_step.outputs.ZIP_FILE_NAME }} # Output the zip filename for later jobs
+      artifact_checksum: ${{ steps.checksum_step.outputs.ARTIFACT_CHECKSUM }} # Output the checksum for later jobs
+      artifact_version: ${{ github.event.inputs.artifact_version }} # Output the version for later jobs
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore dependencies
+        run: dotnet restore ${{ env.FUNCTION_APP_PROJECT_PATH }}/${{ env.FUNCTION_APP_PROJECT_NAME }}.csproj
+
+      - name: Build project
+        run: dotnet build ${{ env.FUNCTION_APP_PROJECT_PATH }}/${{ env.FUNCTION_APP_PROJECT_NAME }}.csproj -c Release --no-restore
+
+      - name: Publish Function App to local directory
+        # This is the directory that will be deployed to Azure
+        run: dotnet publish ${{ env.FUNCTION_APP_PROJECT_PATH }}/${{ env.FUNCTION_APP_PROJECT_NAME }}.csproj -c Release -o ./published-app --no-build
+
+      - name: Zip published Function App (for GitHub Release)
+        id: zip_step # Add an ID to this step to capture its output
+        run: |
+          ZIP_FILE_NAME="${{ env.FUNCTION_APP_PROJECT_NAME }}-${{ github.event.inputs.artifact_version }}.zip"
+          zip -r $ZIP_FILE_NAME ./published-app
+          echo "ZIP_FILE_NAME=$ZIP_FILE_NAME" >> $GITHUB_OUTPUT # Make available to subsequent steps in the same job
+          echo "ZIP_FILE_NAME_FOR_ENV=$ZIP_FILE_NAME" >> $GITHUB_ENV # Also for general env access
+          echo "Created $ZIP_FILE_NAME"
+
+      - name: Calculate SHA256 Checksum
+        id: checksum_step # Add an ID to this step to capture its output
+        run: |
+          CHECKSUM=$(sha256sum ${{ env.ZIP_FILE_NAME_FOR_ENV }} | awk '{print $1}')
+          echo "ARTIFACT_CHECKSUM=$CHECKSUM" >> $GITHUB_OUTPUT # Make available to subsequent steps in the same job
+          echo "ARTIFACT_CHECKSUM_FOR_ENV=$CHECKSUM" >> $GITHUB_ENV # Also for general env access
+          echo "SHA256 Checksum: $CHECKSUM"
+
+      - name: Create GitHub Release and Upload Artifacts
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ github.event.inputs.artifact_version }} # Tag for the release (e.g., v1.0.0)
+          name: Release v${{ github.event.inputs.artifact_version }} - ${{ env.FUNCTION_APP_PROJECT_NAME }}
+          body: |
+            Automated release of ${{ env.FUNCTION_APP_PROJECT_NAME }}.
+            Version: ${{ github.event.inputs.artifact_version }}
+            SHA256 Checksum: ${{ steps.checksum_step.outputs.ARTIFACT_CHECKSUM }}
+          files: |
+            ${{ env.ZIP_FILE_NAME_FOR_ENV }}
+            ${{ env.ZIP_FILE_NAME_FOR_ENV }}.sha256 # Upload the checksum file
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This is automatically provided by GitHub Actions
+
+      # Upload the 'published-app' folder as a workflow artifact
+      # This makes it directly consumable by a subsequent job in the same workflow run
+      - name: Upload Deployment Artifact for Azure
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.FUNCTION_APP_PROJECT_NAME }}-published-app-${{ github.event.inputs.artifact_version }}
+          path: ./published-app
+          retention-days: 5 # How long to keep the artifact (adjust as needed)
+
+  deploy-to-azure:
+    # This job explicitly waits for 'build-and-publish-artifact' to complete successfully
+    needs: build-and-publish-artifact
+    runs-on: ubuntu-latest
+    # Recommended: Use GitHub Environments for controlled deployments (e.g., requires manual approval)
+    environment: Production # You'll need to define this environment in your repository settings
+
+    steps:
+      - name: Download Deployment Artifact for Azure
+        uses: actions/download-artifact@v4
+        with:
+          # Use the exact name given during upload in the previous job
+          name: ${{ env.FUNCTION_APP_PROJECT_NAME }}-published-app-${{ needs.build-and-publish-artifact.outputs.artifact_version }}
+          path: ./downloaded-app # Download to a new directory for deployment
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          # For OIDC, ensure you have 'id-token: write' permission at the job or workflow level
+          # If using service principal with client secret directly, ensure AZURE_CLIENT_SECRET is set in secrets.
+
+      - name: Deploy to Azure Function App
+        uses: azure/functions-action@v1
+        with:
+          app-name: ${{ secrets.AZURE_FUNCTIONAPP_NAME }}
+          package: './downloaded-app' # Point to the downloaded artifact directory
+          publish-type: zip
+          slot-name: production # Or other slot name (e.g., 'staging' for a staging environment)
+
+      - name: Wait for Function App to Start
+        if: success()
+        run: sleep 10 # Give the Function App some time to spin up after deployment
+
+      - name: Verify Deployment (HTTP)
+        if: success()
+        run: |
+          # IMPORTANT: Update '/api/YourFunctionEndpoint' to the actual path of your HTTP-triggered function
+          FUNCTION_APP_URL="https://${{ secrets.AZURE_FUNCTIONAPP_NAME }}.azurewebsites.net/api/YourFunctionEndpoint"
+          echo "Attempting to verify Function App at: $FUNCTION_APP_URL"
+          STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" $FUNCTION_APP_URL)
+          echo "HTTP Status Code received: $STATUS_CODE"
+          if [ $STATUS_CODE -eq 200 ]; then
+            echo "Successfully verified Function App deployment with 200 OK!"
+          else
+            echo "Failed to verify Function App deployment. Status code: $STATUS_CODE"
+            exit 1 # Fail the workflow step if verification fails
+          fi
+
+      - name: Post-Deployment Verification: Check SCM_COMMIT_ID (Optional but Recommended)
+        if: success()
+        run: |
+          # Retrieve the deployed SCM_COMMIT_ID from Azure Function App settings
+          # Ensure AZURE_RESOURCES_GROUP is correctly set in secrets and used here
+          echo "Retrieving SCM_COMMIT_ID from Azure Function App..."
+          DEPLOYED_COMMIT_ID=$(az functionapp config appsettings list \
+            --name ${{ secrets.AZURE_FUNCTIONAPP_NAME }} \
+            --resource-group ${{ secrets.AZURE_RESOURCES_GROUP }} \
+            --query "[?name=='SCM_COMMIT_ID'].value" -o tsv)
+
+          # The commit ID of the code that triggered this workflow
+          WORKFLOW_COMMIT_ID="${{ github.sha }}"
+
+          echo "Deployed SCM_COMMIT_ID: $DEPLOYED_COMMIT_ID"
+          echo "Workflow Triggering Commit ID: $WORKFLOW_COMMIT_ID"
+
+          if [ "$DEPLOYED_COMMIT_ID" == "$WORKFLOW_COMMIT_ID" ]; then
+            echo "Post-deployment verification successful: Deployed code commit ID matches workflow commit ID."
+          else
+            echo "WARNING: Deployed code commit ID ($DEPLOYED_COMMIT_ID) does NOT match the workflow triggering commit ID ($WORKFLOW_COMMIT_ID)."
+            echo "This could indicate an out-of-band deployment or a version mismatch if the workflow didn't run on the latest commit."
+            # Consider adding 'exit 1' here if you want this check to fail the entire workflow
+          fi
