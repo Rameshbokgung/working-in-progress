@@ -1,0 +1,13 @@
+      - name: Clean Published App for Deployment
+        run: |
+          echo "Checking for and removing problematic folders from ./published-app..."
+          # Remove .azurefunctions folder if it exists
+          if [ -d "./published-app/.azurefunctions" ]; then
+            echo "Removing ./published-app/.azurefunctions"
+            rm -rf "./published-app/.azurefunctions"
+          fi
+          # Add similar lines for other development/build artifacts if you find them
+          # Example: if [ -d "./published-app/bin" ]; then rm -rf "./published-app/bin"; fi
+          # Example: if [ -d "./published-app/obj" ]; then rm -rf "./published-app/obj"; fi
+          # You might want to remove other local config files that are not for deployment, like .vscode if it gets copied
+          echo "Cleanup complete."
