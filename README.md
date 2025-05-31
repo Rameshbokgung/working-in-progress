@@ -1,6 +1,5 @@
 # working-in-progress
 
-Okay, let's build out the full workflow that includes both publishing the versioned zip artifact to GitHub Releases and deploying that artifact to your Azure Function App.
 
 We'll structure this into two jobs:
 
