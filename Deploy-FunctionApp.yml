@@ -1,3 +1,54 @@
+# Deploy Azure Function App with Private Endpoint using ACI
+# Here's how we'd adapt the workflow.  This is more complex, but it avoids a long-running VM:
+# Deploy Azure Function App with Private Endpoint using ACI
+# Apr 16, 1:54 PM
+
+# Key Changes and Explanation
+
+# runs-on: ubuntu-latest: The GitHub Action itself runs on a GitHub-hosted runner. We use this runner to orchestrate the creation and deletion of the ACI.
+# Set up Azure credentials: Uses the azure/login action to authenticate with Azure.
+# Build Function App: Builds and zips the function app.
+
+# Deploy with ACI: This step does the heavy lifting:
+# Environment Variables: We define environment variables to pass Azure credentials and configuration to the ACI container. Important: Use GitHub secrets to store the credential values.
+# az container create: This command creates the ACI:
+# --resource-group, --name, --image: Standard ACI parameters. We use the mcr.microsoft.com/azure-cli image, which has the Azure CLI pre-installed.
+# --vnet, --subnet: Crucially, we specify the VNet and subnet. This puts the ACI in the correct network.
+# --environment-variables: We pass the necessary Azure credentials and the function app name as environment variables to the container.
+# --command-line: This is the command that runs inside the ACI container:
+# Logs in to Azure using the service principal.
+# Sets the correct subscription.
+# Uses az functionapp deployment source config-zip to deploy the zip package to the Function App.
+# --mount-volume-folders: Mounts a volume
+# --ports: Opens port 80
+# az container exec & az container copy: Copies the zipped deployment package into the ACI container. This is a simplified way to get the package into the container. For more complex scenarios, you might use Azure Blob Storage.
+# az container delete: Deletes the ACI after the deployment is complete. This is essential to keep costs down and avoid leaving containers running.
+# Important Setup
+
+# Azure Resources:
+# Virtual Network (VNet): You must have a VNet in Azure with a subnet that can communicate with your Function App's Private Endpoint.
+# Azure Function App with Private Endpoint: Your Function App should already be configured with a Private Endpoint.
+# Service Principal: You need an Azure Service Principal with permissions to:
+# Create and delete Azure Container Instances.
+# Deploy to the Function App.
+# GitHub Secrets: In your GitHub repository settings, add these secrets:
+# AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID: For the Service Principal.
+# AZURE_RESOURCE_GROUP: The name of the resource group where your Function App and VNet are located.
+# AZURE_VNET_NAME: The name of your Azure Virtual Network.
+# AZURE_SUBNET_NAME: The name of the subnet within your VNet that will be used for the ACI.
+# AZURE_FUNCTION_APP_NAME: The name of your function app.
+# Benefits
+
+# Relatively Serverless: The ACI is only created when needed for deployment, and it's deleted immediately afterward.
+# VNet Integration: The ACI runs within your VNet, solving the Private Endpoint access problem.
+# Automation: The entire process is automated within your GitHub Actions workflow.
+# Drawbacks
+
+# Complexity: This approach is more complex than using a self-hosted VM runner.
+# Cost: You'll incur costs for the ACI each time you deploy. However, these costs are usually low for short-lived containers.
+# Deployment Time: There's a slight delay for the ACI to start up before the deployment can begin.
+
+
 name: Deploy-FunctionApp
 
 on:
