@@ -1,0 +1,71 @@
+name: Deploy-FunctionApp
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/MyFunctionApp/**'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest # Runner that orchestrates ACI
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Azure credentials
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build Function App
+        run: |
+          dotnet restore src/MyFunctionApp/MyFunctionApp.csproj
+          dotnet build src/MyFunctionApp/MyFunctionApp.csproj -c Release
+          dotnet publish src/MyFunctionApp/MyFunctionApp.csproj -c Release -o ./deploy
+          zip -r functionapp.zip ./deploy
+
+      - name: Deploy with ACI
+        env:
+          RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }} #Added resource group
+          ACI_NAME: function-deploy-aci
+          CONTAINER_IMAGE: mcr.microsoft.com/azure-cli # Use Azure CLI image
+          VNET_NAME: ${{ secrets.AZURE_VNET_NAME }}      # Add vnet name
+          SUBNET_NAME: ${{ secrets.AZURE_SUBNET_NAME }}    # Add subnet name
+          FUNCTION_APP_NAME: ${{ secrets.AZURE_FUNCTION_APP_NAME }}
+        run: |
+          # 1. Create ACI
+          az container create \
+            --resource-group $RESOURCE_GROUP \
+            --name $ACI_NAME \
+            --image $CONTAINER_IMAGE \
+            --vnet $VNET_NAME \
+            --subnet $SUBNET_NAME \
+            --environment-variables \
+              AZURE_CLIENT_ID=$AZURE_CLIENT_ID \
+              AZURE_TENANT_ID=$AZURE_TENANT_ID \
+              AZURE_SUBSCRIPTION_ID=$AZURE_SUBSCRIPTION_ID \
+              AZURE_CLIENT_SECRET=$AZURE_CLIENT_SECRET \
+              FUNCTION_APP_NAME=$FUNCTION_APP_NAME \
+            --command-line "/bin/bash -c 'echo \\\"Running deployment...\\\" && \
+                           az login --service-principal -u \\\"$AZURE_CLIENT_ID\\\" -p \\\"$AZURE_CLIENT_SECRET\\\" --tenant \\\"$AZURE_TENANT_ID\\\" && \
+                           az account set --subscription \\\"$AZURE_SUBSCRIPTION_ID\\\" && \
+                           cd /app && \
+                           az functionapp deployment source config-zip --resource-group $RESOURCE_GROUP --name $FUNCTION_APP_NAME --src /app/functionapp.zip && echo \\\"Deployment complete.\\\"'" \
+            --mount-volume-folders \
+              /app \
+            --ports 80
+          # 2. Copy the deployment package to the ACI (using a simple approach for the example)
+          az container exec --name $ACI_NAME --resource-group $RESOURCE_GROUP --command "mkdir /app"
+          az container copy --resource-group $RESOURCE_GROUP --name $ACI_NAME -s .:/home/site/wwwroot/deploy/functionapp.zip -t /app/functionapp.zip
+          # 3. Wait for deployment to finish (part of the ACI command)
+
+          # 4. Delete the ACI
+          az container delete --name $ACI_NAME --resource-group $RESOURCE_GROUP --yes
